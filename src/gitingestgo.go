@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -18,190 +19,130 @@ import (
 )
 
 const (
-	// MaxFileSize represents the maximum size of a file (in bytes) that will be processed.
-	MaxFileSize = 10 * 1024 * 1024 // 10MB
+	// MaxFileSize indicates the maximum size of a file (in bytes) to be processed.
+	MaxFileSize = 10 * 1024 * 1024 // 10 MB
 
-	// MaxDirectoryDepth represents the maximum depth of directories that will be scanned.
+	// MaxDirectoryDepth sets the maximum directory depth to scan to avoid runaway recursion.
 	MaxDirectoryDepth = 20
 
-	// MaxFiles represents the maximum number of files that will be processed.
+	// MaxFiles sets the maximum number of files to process before stopping.
 	MaxFiles = 10000
 
-	// MaxTotalSizeBytes represents the maximum total size of files (in bytes) that will be processed.
-	MaxTotalSizeBytes = 500 * 1024 * 1024 // 500MB
+	// MaxTotalSizeBytes indicates the maximum total size of files (in bytes) before stopping the scan.
+	MaxTotalSizeBytes = 500 * 1024 * 1024 // 500 MB
 
-	// DefaultIgnoreFile is the default name of the ignore file to use if no custom ignore patterns are provided.
+	// DefaultIgnoreFile is the default file (e.g. .gitignore) used for ignore patterns, if not overridden.
 	DefaultIgnoreFile = ".gitignore"
 )
 
-// FileInfo represents a file with its content and metadata.
+// FileInfo holds essential file data, including path, content, and size.
 type FileInfo struct {
 	Path    string
 	Content string
 	Size    int64
 }
 
-// parseGitIgnore reads a .gitignore file and returns a slice of ignore patterns.
-func parseGitIgnore(filePath string) ([]string, error) {
+/*
+parseIgnoreFile reads lines from an ignore file (e.g. .gitignore) and returns the
+patterns to be ignored. Lines starting with '#' or empty lines are skipped.
+This function is used to ensure no unneeded files pollute our scan results.
+*/
+func parseIgnoreFile(filePath string) ([]string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		// Return an error if the ignore file can't be opened
+		return nil, fmt.Errorf("unable to open ignore file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	var patterns []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
-			continue // Skip empty lines and comments
+			// Skip comments and empty lines
+			continue
 		}
 		patterns = append(patterns, line)
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error reading ignore file: %w", err)
 	}
 
 	return patterns, nil
 }
 
-// matchesPattern checks if a path matches a given .gitignore pattern.
+/*
+matchesPattern checks if a given path (relative to the root) matches a .gitignore pattern.
+- It handles negation (!) patterns.
+- It recognizes patterns like "*" (recursive) and "/" (root-based) for directories.
+- If a file or directory is matched by a pattern, it is considered ignored.
+*/
 func matchesPattern(path string, pattern string, isDir bool) bool {
-	// Handle negation patterns
 	negate := false
 	if strings.HasPrefix(pattern, "!") {
 		negate = true
 		pattern = pattern[1:]
 	}
 
-	// Handle absolute paths in .gitignore
+	// Remove leading slash in patterns to standardize
 	if strings.HasPrefix(pattern, "/") {
 		pattern = pattern[1:]
 	}
 
-	// Handle **/ for recursive directory matching
+	// Handle '**/' for recursive directory matching
 	if strings.Contains(pattern, "**/") {
+		// Convert to a more general regular expression
 		pattern = strings.ReplaceAll(pattern, "**/", "(.*/)?")
 	}
 
-	// Handle */ for directory matching at current level
+	// Directory-specific pattern: If pattern ends with '/', it applies only to directories
 	if strings.HasSuffix(pattern, "/") {
 		if isDir {
 			pattern = strings.TrimSuffix(pattern, "/") + "(/.*)?"
 		} else {
-			return false // Pattern is for directories but path is a file
+			return false
 		}
 	}
 
-	// Convert the .gitignore pattern to a regular expression
+	// Convert wildcard expressions to regular expressions
 	pattern = "^" + strings.ReplaceAll(pattern, ".", "\\.")
 	pattern = strings.ReplaceAll(pattern, "*", ".*")
 	pattern = pattern + "$"
 
 	matched, err := regexp.MatchString(pattern, path)
 	if err != nil {
-		return false // Invalid pattern
+		// If there's an invalid pattern, treat it as non-matching for safety
+		log.Printf("warning: invalid pattern encountered: %v", err)
+		return false
 	}
 
 	return matched == !negate
 }
 
-// scanDirectory recursively scans a directory, respecting ignore patterns and limits.
-func scanDirectory(basePath string, ignorePatterns []string, maxFileSize int64) ([]FileInfo, string, error) {
-	var files []FileInfo
-	var dirStructure strings.Builder
-	var mu sync.Mutex
-	var wg sync.WaitGroup
+/*
+isTextFile uses heuristic checks to determine if a file is textual:
+  - Checks for Unicode Byte Order Mark (BOM).
+  - Searches for null bytes or high-range control characters that typically
+    do not appear in text files.
 
-	// Check if the path is a symlink to a directory
-	fileInfo, err := os.Lstat(basePath)
-	if err != nil {
-		return nil, "", fmt.Errorf("error getting file info: %v", err)
-	}
-
-	isSymlinkToDir := false
-	if fileInfo.Mode()&os.ModeSymlink != 0 {
-		realPath, err := filepath.EvalSymlinks(basePath)
-		if err != nil {
-			return nil, "", fmt.Errorf("error evaluating symlink: %v", err)
-		}
-		realFileInfo, err := os.Stat(realPath)
-		if err != nil {
-			return nil, "", fmt.Errorf("error getting real file info: %v", err)
-		}
-		isSymlinkToDir = realFileInfo.IsDir()
-	}
-
-	// if symlink to directory or just a normal directory, traverse it
-	if isSymlinkToDir || fileInfo.IsDir() {
-		err = filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err // Handle errors encountered during traversal.
-			}
-
-			// Prevent recursing into symlinked directories to avoid infinite loops.
-			if info.Mode()&os.ModeSymlink != 0 {
-				return filepath.SkipDir
-			}
-
-			relPath, _ := filepath.Rel(basePath, path)
-			if relPath == "." {
-				return nil // Skip the root directory itself.
-			}
-
-			// Check ignore patterns.
-			for _, pattern := range ignorePatterns {
-				if matchesPattern(relPath, pattern, info.IsDir()) {
-					if info.IsDir() {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-			}
-
-			if info.IsDir() {
-				// Append directory to tree structure.
-				appendToTree(&dirStructure, relPath, basePath, true)
-			} else if isTextFile(path) && info.Size() <= maxFileSize {
-				// Append file to tree structure.
-				appendToTree(&dirStructure, relPath, basePath, false)
-				// Process files concurrently.
-				wg.Add(1)
-				go func(path string, size int64) {
-					defer wg.Done()
-					if content, err := readFileContent(path, maxFileSize); err == nil {
-						mu.Lock()
-						files = append(files, FileInfo{Path: relPath, Content: content, Size: size})
-						mu.Unlock()
-					}
-				}(path, info.Size())
-			}
-
-			return nil
-		})
-	} else if isTextFile(basePath) && fileInfo.Size() <= maxFileSize {
-		// If it's a single file, process it directly.
-		if content, err := readFileContent(basePath, maxFileSize); err == nil {
-			files = append(files, FileInfo{Path: filepath.Base(basePath), Content: content, Size: fileInfo.Size()})
-			dirStructure.WriteString(filepath.Base(basePath) + "\n")
-		}
-	}
-
-	wg.Wait() // Wait for all file processing goroutines to complete.
-
-	return files, dirStructure.String(), err
-}
-
-// isTextFile checks if a file is likely a text file based on its content.
+This helps avoid reading binary files which can disrupt token counting or logging.
+*/
 func isTextFile(filename string) bool {
 	f, err := os.Open(filename)
 	if err != nil {
+		// We cannot open the file, so skip
+		log.Printf("warning: could not open file '%s': %v", filename, err)
 		return false
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
-	// Check for Unicode BOM at the beginning of the file
+	// Read up to 4 bytes to detect BOM
 	bom := make([]byte, 4)
 	if _, err := f.Read(bom); err == nil {
 		if isUnicodeBOM(bom) {
@@ -209,26 +150,29 @@ func isTextFile(filename string) bool {
 		}
 	}
 
-	// Reset file offset after checking BOM
-	f.Seek(0, io.SeekStart)
+	// Reset file pointer after BOM check
+	_, _ = f.Seek(0, io.SeekStart)
 
+	// Check for null bytes in the first ~1KB
 	buf := make([]byte, 1024)
 	n, err := f.Read(buf)
 	if err != nil && err != io.EOF {
+		log.Printf("warning: could not read from file '%s': %v", filename, err)
 		return false
 	}
-
-	// Check for presence of null bytes or control characters
 	for _, b := range buf[:n] {
-		if b == 0 || (b < 32 && b != 9 && b != 10 && b != 13) { // Allow horizontal tab, line feed, carriage return
+		// Null bytes or unusual control characters typically indicate binary data
+		if b == 0 || (b < 32 && b != 9 && b != 10 && b != 13) {
 			return false
 		}
 	}
-
 	return true
 }
 
-// isUnicodeBOM checks if the given bytes represent a Unicode BOM.
+/*
+isUnicodeBOM returns true if the first few bytes of the file represent
+any recognized Unicode BOM (UTF-8, UTF-16, UTF-32 variants).
+*/
 func isUnicodeBOM(bom []byte) bool {
 	return (bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) || // UTF-8
 		(bom[0] == 0xFE && bom[1] == 0xFF) || // UTF-16 (BE)
@@ -237,21 +181,25 @@ func isUnicodeBOM(bom []byte) bool {
 		(bom[0] == 0xFF && bom[1] == 0xFE && bom[2] == 0x00 && bom[3] == 0x00) // UTF-32 (LE)
 }
 
-// readFileContent reads the content of a file, applying a size limit.
-func readFileContent(filepath string, maxFileSize int64) (string, error) {
-	f, err := os.Open(filepath)
+/*
+readFileLimited reads the entire content of a file up to a specified maxFileSize.
+If the file size exceeds maxFileSize, reading is aborted to save resources.
+*/
+func readFileLimited(path string, maxFileSize int64) (string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to open file '%s': %w", path, err)
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	fi, err := f.Stat()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get file info '%s': %w", path, err)
 	}
-
 	if fi.Size() > maxFileSize {
-		return "", fmt.Errorf("file too large")
+		return "", fmt.Errorf("file '%s' exceeds max file size limit", path)
 	}
 
 	var builder strings.Builder
@@ -260,69 +208,95 @@ func readFileContent(filepath string, maxFileSize int64) (string, error) {
 		builder.WriteString(scanner.Text())
 		builder.WriteString("\n")
 	}
-
 	if err := scanner.Err(); err != nil {
-		return "", err
+		return "", fmt.Errorf("error scanning file '%s': %w", path, err)
 	}
 
 	return builder.String(), nil
 }
 
-// appendToTree appends a directory or file to the tree structure string.
+/*
+appendToTree is a utility for building a "directory tree" representation.
+The relPath is the path relative to the basePath. We count the number of
+separators to derive indentation. We add ASCII tree prefixes like "├──", "└──", etc.
+*/
 func appendToTree(builder *strings.Builder, relPath string, basePath string, isDir bool) {
 	depth := strings.Count(relPath, string(os.PathSeparator))
+
+	// Direct child of the root
 	if depth == 0 {
 		if isDir {
 			builder.WriteString(relPath + string(os.PathSeparator) + "\n")
 		} else {
 			builder.WriteString(relPath + "\n")
 		}
-	} else {
-		prefix := strings.Repeat("│   ", depth-1)
-		// Check if it's the last element at the current depth
-		isLast := isLastElement(basePath, relPath)
-		if isLast {
-			if isDir {
-				builder.WriteString(prefix + "└── " + filepath.Base(relPath) + string(os.PathSeparator) + "\n")
-			} else {
-				builder.WriteString(prefix + "└── " + filepath.Base(relPath) + "\n")
-			}
+		return
+	}
+
+	// For deeper paths, we build a prefix for indentation
+	prefix := strings.Repeat("│   ", depth-1)
+	isLast := isLastElement(basePath, relPath)
+	name := filepath.Base(relPath)
+
+	if isLast {
+		if isDir {
+			builder.WriteString(prefix + "└── " + name + string(os.PathSeparator) + "\n")
 		} else {
-			if isDir {
-				builder.WriteString(prefix + "├── " + filepath.Base(relPath) + string(os.PathSeparator) + "\n")
-			} else {
-				builder.WriteString(prefix + "├── " + filepath.Base(relPath) + "\n")
-			}
+			builder.WriteString(prefix + "└── " + name + "\n")
+		}
+	} else {
+		if isDir {
+			builder.WriteString(prefix + "├── " + name + string(os.PathSeparator) + "\n")
+		} else {
+			builder.WriteString(prefix + "├── " + name + "\n")
 		}
 	}
 }
 
-// isLastElement checks if the current element is the last at its depth.
+/*
+isLastElement checks directory contents to see if the current file/directory
+is the last one at its depth level. This ensures correct usage of "├──" vs. "└──"
+in the ASCII tree output.
+*/
 func isLastElement(basePath, relPath string) bool {
 	parts := strings.Split(relPath, string(os.PathSeparator))
 	if len(parts) < 2 {
-		return true // Root or single-level element is always last
+		// Root or single-level element is always considered "last" since there's no sibling
+		return true
 	}
 
 	parentDir := filepath.Join(basePath, strings.Join(parts[:len(parts)-1], string(os.PathSeparator)))
 	currentBase := parts[len(parts)-1]
 
-	entries, _ := os.ReadDir(parentDir)
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		// If we can't read the directory, assume it's last to avoid repeated errors
+		log.Printf("warning: could not read parent directory '%s': %v", parentDir, err)
+		return true
+	}
 
+	// Collect names in the parent directory
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		names = append(names, entry.Name())
 	}
 
-	return names[len(names)-1] == currentBase
+	// If the last item in alphabetical order matches the current file name, it's last
+	return len(names) > 0 && names[len(names)-1] == currentBase
 }
 
-// formatFilesContent creates a formatted string of file contents.
+/*
+formatFilesContent organizes the file contents with a clear heading separator.
+- If a README.md file exists, it’s moved to the top to prioritize user documentation.
+- After that, each file’s content is displayed with a "File: {filename}" header.
+*/
 func formatFilesContent(files []FileInfo) string {
 	var contentBuilder strings.Builder
+
+	// We use a separator for clarity between files
 	separator := strings.Repeat("=", 48) + "\n"
 
-	// Find and prepend the README file, if it exists.
+	// If there's a README, place it first
 	for i, file := range files {
 		if strings.ToLower(file.Path) == "readme.md" {
 			contentBuilder.WriteString(separator)
@@ -330,13 +304,13 @@ func formatFilesContent(files []FileInfo) string {
 			contentBuilder.WriteString(separator)
 			contentBuilder.WriteString(file.Content + "\n\n")
 
-			// Remove the README file from the slice to avoid duplicate processing.
+			// Remove README from the slice so we don't duplicate below
 			files = append(files[:i], files[i+1:]...)
 			break
 		}
 	}
 
-	// Process the rest of the files.
+	// Append the rest of the files
 	for _, file := range files {
 		contentBuilder.WriteString(separator)
 		contentBuilder.WriteString(fmt.Sprintf("File: %s\n", file.Path))
@@ -347,27 +321,35 @@ func formatFilesContent(files []FileInfo) string {
 	return contentBuilder.String()
 }
 
-// countTokens estimates the number of tokens in the given text.
+/*
+countTokens uses the TikToken library to estimate the number of tokens in
+the provided text. We return a user-friendly formatted token count (e.g., "1.2k").
+*/
 func countTokens(text string) (string, error) {
 	enc, err := tiktoken.GetEncoding("cl100k_base")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get encoding: %w", err)
 	}
 
 	totalTokens := len(enc.Encode(text, nil, nil))
-	var formattedTokens string
-	if totalTokens > 1000000 {
-		formattedTokens = fmt.Sprintf("%.1fM", float64(totalTokens)/1000000)
-	} else if totalTokens > 1000 {
-		formattedTokens = fmt.Sprintf("%.1fk", float64(totalTokens)/1000)
-	} else {
-		formattedTokens = fmt.Sprintf("%d", totalTokens)
+	switch {
+	case totalTokens > 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(totalTokens)/1_000_000), nil
+	case totalTokens > 1_000:
+		return fmt.Sprintf("%.1fk", float64(totalTokens)/1_000), nil
+	default:
+		return fmt.Sprintf("%d", totalTokens), nil
 	}
-
-	return formattedTokens, nil
 }
 
-// createSummary creates a summary of the repository analysis.
+/*
+createSummary prepares a brief summary of the scan results:
+- Repository name
+- Number of files analyzed
+- Subpath (if specified)
+- Commit or branch (if specified)
+- Estimated tokens from the text content
+*/
 func createSummary(repoName, branch, commit, subpath string, fileCount int, tokenCount string) string {
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("Repository: %s\n", repoName))
@@ -381,12 +363,17 @@ func createSummary(repoName, branch, commit, subpath string, fileCount int, toke
 	} else if branch != "" && branch != "main" && branch != "master" {
 		summary.WriteString(fmt.Sprintf("Branch: %s\n", branch))
 	}
+
 	summary.WriteString(fmt.Sprintf("Estimated tokens: %s", tokenCount))
 
 	return summary.String()
 }
 
-// parsePatterns parses a comma-separated string of patterns into a slice of strings.
+/*
+parsePatterns takes a comma-separated string of patterns, trims spaces, and
+returns a slice for each pattern. This is used to handle user-supplied
+exclude patterns.
+*/
 func parsePatterns(patterns string) []string {
 	var parsedPatterns []string
 	for _, p := range strings.Split(patterns, ",") {
@@ -398,13 +385,18 @@ func parsePatterns(patterns string) []string {
 	return parsedPatterns
 }
 
-// overrideIgnorePatterns overrides the default ignore patterns with include patterns.
+/*
+overrideIgnorePatterns ensures that any explicitly included patterns
+(in `includePatterns`) are not excluded by default. This is done by filtering out
+patterns that match the included ones.
+*/
 func overrideIgnorePatterns(ignorePatterns []string, includePatterns []string) []string {
 	var newIgnorePatterns []string
 	for _, ignorePattern := range ignorePatterns {
 		shouldIgnore := true
 		for _, includePattern := range includePatterns {
-			if matched, _ := filepath.Match(includePattern, ignorePattern); matched {
+			matched, _ := filepath.Match(includePattern, ignorePattern)
+			if matched {
 				shouldIgnore = false
 				break
 			}
@@ -416,26 +408,25 @@ func overrideIgnorePatterns(ignorePatterns []string, includePatterns []string) [
 	return newIgnorePatterns
 }
 
-// parseIncludePatterns parses a pattern string into a slice of include patterns.
+/*
+parseIncludePatterns normalizes user-provided include patterns:
+- Removes leading './' or '/'.
+- If the pattern ends with '/', we add '**' to match any subdirectories or files under it.
+*/
 func parseIncludePatterns(pattern string) []string {
-	// Remove leading and trailing spaces and split by comma
 	parts := strings.Split(strings.TrimSpace(pattern), ",")
-
 	var patterns []string
+
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-
-		// Normalize the pattern: remove leading './' or '/'
 		if strings.HasPrefix(part, "./") {
 			part = part[2:]
 		} else if strings.HasPrefix(part, "/") {
 			part = part[1:]
 		}
-
-		// If the pattern is just a directory (ends with '/'), append '**' to match all subdirectories and files
 		if strings.HasSuffix(part, "/") {
 			patterns = append(patterns, part+"**")
 		} else {
@@ -446,158 +437,335 @@ func parseIncludePatterns(pattern string) []string {
 	return patterns
 }
 
-// ParseQuery parses the input query and returns the parsed information.
-func ParseQuery(input string, maxFileSize int, fromWeb bool, includePatternsStr, excludePatternsStr string) (map[string]interface{}, error) {
+/*
+ParseQuery orchestrates the input parsing:
+- Validates whether the input is a local path vs. a web URL (web URLs are unsupported here).
+- Sets default ignore patterns and overrides them with user-supplied excludes/includes.
+- Creates a short "id" from hashing the absolute path to keep track of the project reference.
+Returns a map that consolidates all relevant query metadata.
+*/
+func ParseQuery(input string, maxFileSizeKB int, fromWeb bool, includePatternsStr, excludePatternsStr string) (map[string]interface{}, error) {
 	result := make(map[string]interface{})
 
 	if fromWeb {
-		return nil, fmt.Errorf("web URL processing not implemented for CLI")
+		// For demonstration, we return an explicit error here if fromWeb is true
+		return nil, errors.New("web URL processing is not implemented for CLI in this example")
 	}
 
-	// Parse as local path
+	// Validate local path and convert to absolute
 	absPath, err := filepath.Abs(input)
 	if err != nil {
-		return nil, fmt.Errorf("invalid local path: %v", err)
+		return nil, fmt.Errorf("invalid local path: %w", err)
 	}
 
-	// Use the absolute path to construct the local_path
-	result["local_path"] = absPath
+	// Basic input validation: ensure path actually exists
+	if _, err := os.Stat(absPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("the specified path does not exist: %s", absPath)
+	}
 
-	// Use the base of the absolute path as the slug
-	result["slug"] = filepath.Base(absPath)
+	// Populate result with key-value pairs
+	result["local_path"] = absPath
+	result["slug"] = filepath.Base(absPath) // A short project slug based on the directory name
 	result["subpath"] = "/"
 
-	// Generate a unique ID using a part of the SHA-256 hash of the absolute path
+	// Generate a short ID from path-based hashing
 	idBytes := sha256.Sum256([]byte(absPath))
-	result["id"] = base58.Encode(idBytes[:16]) // Encode to Base58, using first 16 bytes for brevity
+	result["id"] = base58.Encode(idBytes[:16]) // Keep first 16 bytes for brevity
 
-	// Set default ignore patterns and override with user-provided patterns
+	// Default ignore patterns for typical file types that are not relevant to code analysis
 	defaultIgnorePatterns := []string{
-		"*.o", "*.exe", "*.dll", "*.so", "*.dylib", // Object files, executables, and libraries
-		"*.pyc", "*.pyo", "*.pyd", // Python
-		"*.class", "*.jar", "*.war", "*.ear", // Java
-		"*.exe", "*.dll", "*.obj", "*.o", "*.a", "*.lib", "*.so", // Windows
-		"*.o", "*.a", "*.so", "*.dylib", // macOS
-		"*.o", "*.a", "*.so", "*.so.*", // Linux
-		"node_modules/", "vendor/", "bower_components/", // Node.js, PHP, Bower
-		".git/", ".svn/", ".hg/", ".DS_Store/", // Version control and macOS system files
-		"__pycache__/", "venv/", ".venv/", "env/", ".env/", // Python virtual environments and caches
-		".idea/", ".vscode/", "*.sublime-project", "*.sublime-workspace", // IDE files
-		"*.log", "*.tmp", "*.bak", // Temporary and log files
-		".next/", ".nuxt/", "dist/", "build/", "target/", // Build and output directories
-		"*.zip", "*.tar", "*.tar.gz", "*.rar", "*.7z", // Compressed files
-		"*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.tiff", "*.ico", // Image files
-		"*.mp4", "*.avi", "*.mkv", "*.mov", "*.wmv", "*.flv", // Video files
-		"*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg", // Audio files
-		"*.pdf", "*.doc", "*.docx", "*.xls", "*.xlsx", "*.ppt", "*.pptx", // Document files
-		".gitignore", ".DS_Store", // Other common files
-		"*.pem", "*.cer", "*.crt", "*.key", // Certificate and key files
+		"*.o", "*.exe", "*.dll", "*.so", "*.dylib",
+		"*.pyc", "*.pyo", "*.pyd", "*.class", "*.jar", "*.war", "*.ear",
+		"*.obj", "*.a", "*.lib",
+		"node_modules/", "vendor/", "bower_components/",
+		".git/", ".svn/", ".hg/", ".DS_Store/",
+		"__pycache__/", "venv/", ".venv/", "env/", ".env/",
+		".idea/", ".vscode/", "*.sublime-project", "*.sublime-workspace",
+		"*.log", "*.tmp", "*.bak",
+		".next/", ".nuxt/", "dist/", "build/", "target/",
+		"*.zip", "*.tar", "*.tar.gz", "*.rar", "*.7z",
+		"*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.tiff", "*.ico",
+		"*.mp4", "*.avi", "*.mkv", "*.mov", "*.wmv", "*.flv",
+		"*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg",
+		"*.pdf", "*.doc", "*.docx", "*.xls", "*.xlsx", "*.ppt", "*.pptx",
+		".gitignore", ".DS_Store",
+		"*.pem", "*.cer", "*.crt", "*.key",
+		"go.mod", "go.sum", "package-lock.json", "yarn.lock",
+		"*.min.js", "*.min.css",
+		"*.woff", "*.woff2", "*.eot", "*.ttf", "*.otf",
+		"*.svg", "*.ico", "*.webp",
+		"*.json", "*.xml", "*.yaml", "*.yml", "*.toml",
+		"*.md", "*.markdown", "*.rst", "*.txt",
+		"*.mod", "*.sum", "*.lock",
 	}
 
+	var finalIgnorePatterns []string
+	finalIgnorePatterns = append(finalIgnorePatterns, defaultIgnorePatterns...)
+
+	// Add user-supplied exclude patterns if present
 	if excludePatternsStr != "" {
 		excludePatterns := parsePatterns(excludePatternsStr)
-		result["ignore_patterns"] = append(defaultIgnorePatterns, excludePatterns...)
-	} else {
-		result["ignore_patterns"] = defaultIgnorePatterns
+		finalIgnorePatterns = append(finalIgnorePatterns, excludePatterns...)
 	}
 
+	result["ignore_patterns"] = finalIgnorePatterns
+
+	// Process include patterns if provided, overriding any default ignore that conflicts
 	if includePatternsStr != "" {
 		includePatterns := parseIncludePatterns(includePatternsStr)
 		result["include_patterns"] = includePatterns
-		result["ignore_patterns"] = overrideIgnorePatterns(result["ignore_patterns"].([]string), includePatterns)
+		// Filter out default ignores that match the includes
+		finalIgnorePatterns = overrideIgnorePatterns(finalIgnorePatterns, includePatterns)
+		result["ignore_patterns"] = finalIgnorePatterns
 	}
 
-	result["max_file_size"] = int64(maxFileSize * 1024)
+	// Convert KB to bytes
+	result["max_file_size"] = int64(maxFileSizeKB * 1024)
 
 	return result, nil
 }
 
-// IngestFromQuery performs the main ingestion process based on the parsed query.
-func IngestFromQuery(query map[string]interface{}) (string, string, string, error) {
-	localPath := query["local_path"].(string)
+/*
+scanLocalDirectory scans the directory recursively (or processes a single file),
+respecting all ignore patterns, maximum file-size limits, etc.
+It returns a list of FileInfo and a formatted directory tree string.
+*/
+func scanLocalDirectory(
+	basePath string,
+	ignorePatterns []string,
+	maxFileSize int64,
+) ([]FileInfo, string, error) {
 
-	// Read and parse .gitignore files
-	ignorePatterns := []string{}
-	if _, err := os.Stat(filepath.Join(localPath, DefaultIgnoreFile)); err == nil {
-		if patterns, err := parseGitIgnore(filepath.Join(localPath, DefaultIgnoreFile)); err == nil {
-			ignorePatterns = append(ignorePatterns, patterns...)
+	var files []FileInfo
+	var dirStructure strings.Builder
+
+	// Sync primitives to handle concurrent file reading
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	fileInfo, err := os.Lstat(basePath)
+	if err != nil {
+		return nil, "", fmt.Errorf("unable to get file info for '%s': %w", basePath, err)
+	}
+
+	isSymlinkToDir := false
+	if fileInfo.Mode()&os.ModeSymlink != 0 {
+		// If it's a symlink, we resolve it
+		realPath, err := filepath.EvalSymlinks(basePath)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to evaluate symlink for '%s': %w", basePath, err)
+		}
+		realFileInfo, err := os.Stat(realPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to stat symlink target '%s': %w", realPath, err)
+		}
+		isSymlinkToDir = realFileInfo.IsDir()
+	}
+
+	// If it’s a directory (or symlink to a directory), traverse recursively
+	if isSymlinkToDir || fileInfo.IsDir() {
+		err = filepath.Walk(basePath, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				log.Printf("warning: error during filepath.Walk at '%s': %v", path, walkErr)
+				return walkErr
+			}
+
+			// Avoid recursing further into symlinked directories to reduce risk of infinite loops
+			if info.Mode()&os.ModeSymlink != 0 {
+				log.Printf("info: skipping symlinked directory '%s'", path)
+				return filepath.SkipDir
+			}
+
+			relPath, _ := filepath.Rel(basePath, path)
+			if relPath == "." {
+				// Skip root directory itself from listing
+				return nil
+			}
+
+			// Apply ignore patterns before processing
+			for _, pattern := range ignorePatterns {
+				if matchesPattern(relPath, pattern, info.IsDir()) {
+					if info.IsDir() {
+						// If a directory matches, skip the entire sub-tree
+						log.Printf("info: skipping directory '%s' due to ignore pattern '%s'", relPath, pattern)
+						return filepath.SkipDir
+					}
+					// If a file is ignored, just skip it
+					log.Printf("info: skipping file '%s' due to ignore pattern '%s'", relPath, pattern)
+					return nil
+				}
+			}
+
+			if info.IsDir() {
+				// Build directory tree
+				appendToTree(&dirStructure, relPath, basePath, true)
+			} else if isTextFile(path) && info.Size() <= maxFileSize {
+				// Append file to tree
+				appendToTree(&dirStructure, relPath, basePath, false)
+
+				// Process file in a goroutine to improve parallel reads
+				wg.Add(1)
+				go func(p string, size int64) {
+					defer wg.Done()
+					content, fileErr := readFileLimited(p, maxFileSize)
+					if fileErr != nil {
+						log.Printf("warning: reading file '%s' failed: %v", p, fileErr)
+						return
+					}
+					// Protect concurrent map/slice access
+					mu.Lock()
+					files = append(files, FileInfo{
+						Path:    relPath,
+						Content: content,
+						Size:    size,
+					})
+					mu.Unlock()
+				}(path, info.Size())
+			}
+
+			return nil
+		})
+
+	} else {
+		// If it's a single file, process it directly (non-directory)
+		if isTextFile(basePath) && fileInfo.Size() <= maxFileSize {
+			content, readErr := readFileLimited(basePath, maxFileSize)
+			if readErr == nil {
+				files = append(files, FileInfo{
+					Path:    filepath.Base(basePath),
+					Content: content,
+					Size:    fileInfo.Size(),
+				})
+				dirStructure.WriteString(filepath.Base(basePath) + "\n")
+			} else {
+				log.Printf("warning: reading single file '%s' failed: %v", basePath, readErr)
+			}
 		}
 	}
 
-	// Use custom ignore patterns if provided
-	if patterns, ok := query["ignore_patterns"].([]string); ok {
-		ignorePatterns = append(ignorePatterns, patterns...)
+	// Wait for all concurrent file reads to finish
+	wg.Wait()
+
+	if err != nil {
+		return files, dirStructure.String(), fmt.Errorf("error walking through directory '%s': %w", basePath, err)
 	}
 
-	// Always ignore .git directory
+	return files, dirStructure.String(), nil
+}
+
+/*
+IngestFromQuery executes the main scanning logic by reading .gitignore (if exists),
+combining ignore patterns, scanning the path, and finally returning:
+- A summary of the scan
+- The ASCII tree representation of the directory
+- The combined file contents for text files
+*/
+func IngestFromQuery(query map[string]interface{}) (summary string, tree string, filesContent string, err error) {
+	localPath := query["local_path"].(string)
+
+	// Parse .gitignore in the local directory if available
+	var gitIgnorePatterns []string
+	gitIgnorePath := filepath.Join(localPath, DefaultIgnoreFile)
+	if _, statErr := os.Stat(gitIgnorePath); statErr == nil {
+		if patterns, parseErr := parseIgnoreFile(gitIgnorePath); parseErr == nil {
+			gitIgnorePatterns = append(gitIgnorePatterns, patterns...)
+		} else {
+			log.Printf("info: error parsing '%s': %v", gitIgnorePath, parseErr)
+		}
+	}
+
+	// Merge custom ignore patterns with .gitignore
+	ignorePatterns := []string{}
+	if userIgnore, ok := query["ignore_patterns"].([]string); ok {
+		ignorePatterns = append(ignorePatterns, userIgnore...)
+	}
+	ignorePatterns = append(ignorePatterns, gitIgnorePatterns...)
+
+	// Ensure .git/ is always ignored, even if not in .gitignore
 	ignorePatterns = append(ignorePatterns, ".git/")
 
 	maxFileSize := query["max_file_size"].(int64)
-	files, tree, err := scanDirectory(localPath, ignorePatterns, maxFileSize)
-	if err != nil {
-		return "", "", "", fmt.Errorf("error scanning directory: %v", err)
+	files, dirTree, scanErr := scanLocalDirectory(localPath, ignorePatterns, maxFileSize)
+	if scanErr != nil {
+		return "", "", "", fmt.Errorf("scan error: %w", scanErr)
 	}
 
-	filesContent := formatFilesContent(files)
-	tokenCount, err := countTokens(tree + filesContent)
-	if err != nil {
-		return "", "", "", fmt.Errorf("error counting tokens: %v", err)
+	// Build the combined file content output
+	formattedContent := formatFilesContent(files)
+
+	// Count tokens to provide an estimate
+	fullTextForTokenCount := dirTree + formattedContent
+	tokenCount, tokenErr := countTokens(fullTextForTokenCount)
+	if tokenErr != nil {
+		return "", "", "", fmt.Errorf("token counting error: %w", tokenErr)
 	}
 
-	var repoName, branch, commit, subpath string
-	if name, ok := query["slug"].(string); ok {
-		repoName = name
-	}
-	if b, ok := query["branch"].(string); ok {
-		branch = b
-	}
-	if c, ok := query["commit"].(string); ok {
-		commit = c
-	}
-	if sp, ok := query["subpath"].(string); ok {
-		subpath = sp
-	}
+	// Gather metadata for summary
+	repoName, _ := query["slug"].(string)
+	branch, _ := query["branch"].(string)
+	commit, _ := query["commit"].(string)
+	subpath, _ := query["subpath"].(string)
 
-	summary := createSummary(repoName, branch, commit, subpath, len(files), tokenCount)
+	summaryText := createSummary(repoName, branch, commit, subpath, len(files), tokenCount)
 
-	return summary, tree, filesContent, nil
+	return summaryText, dirTree, formattedContent, nil
 }
 
 func main() {
-	inputPtr := flag.String("d", "", "Directory to process")
+	/*
+	   Command-line Flags:
+
+	   -d string : Directory (or file) to scan
+	   -o string : Output file to write combined output
+	   -s int    : Max file size in KB (default 10)
+	   -i string : Include patterns (comma-separated)
+	   -e string : Exclude patterns (comma-separated)
+
+	   Example usage:
+	   go run main.go -d ./your_project -o output.txt -s 20 -i "*.go" -e "*.md"
+	*/
+	inputPtr := flag.String("d", "", "Directory (or file) to process")
 	outputPtr := flag.String("o", "", "Output file name")
-	maxFileSizePtr := flag.Int("s", 10, "Maximum file size in KB")
-	includePatternsPtr := flag.String("i", "", "Include patterns")
-	excludePatternsPtr := flag.String("e", "", "Exclude patterns")
+	maxFileSizePtr := flag.Int("s", 10, "Max file size in KB")
+	includePatternsPtr := flag.String("i", "", "Include patterns (comma-separated)")
+	excludePatternsPtr := flag.String("e", "", "Exclude patterns (comma-separated)")
 
 	flag.Parse()
 
+	// Basic validation of required flags
 	if *inputPtr == "" {
-		log.Fatal("Error: input directory must be specified with -d")
+		log.Fatal("error: you must provide an input directory/file using -d <path>")
 	}
-
 	if *outputPtr == "" {
-		log.Fatal("Error: output file must be specified with -o")
+		log.Fatal("error: you must provide an output file name using -o <filename>")
 	}
 
-	query, err := ParseQuery(*inputPtr, *maxFileSizePtr, false, *includePatternsPtr, *excludePatternsPtr)
+	// Step 1: Parse query (respects advanced reasoning for ignoring unneeded content)
+	query, err := ParseQuery(
+		*inputPtr,
+		*maxFileSizePtr,
+		false, // fromWeb
+		*includePatternsPtr,
+		*excludePatternsPtr,
+	)
 	if err != nil {
-		log.Fatalf("Error parsing query: %v", err)
+		log.Fatalf("error parsing query: %v", err)
 	}
 
+	// Step 2: Ingest data (scan, build tree, combine file content)
 	summary, tree, content, err := IngestFromQuery(query)
 	if err != nil {
-		log.Fatalf("Error during ingestion: %v", err)
+		log.Fatalf("error during ingestion: %v", err)
 	}
 
-	// Write output to file
-	outputFile := *outputPtr
-	err = os.WriteFile(outputFile, []byte("Directory structure:\n"+tree+"\n"+content), 0644)
-	if err != nil {
-		log.Fatalf("Error writing output to file: %v", err)
+	// Step 3: Write results to the specified output file
+	outputContent := "Directory structure:\n" + tree + "\n" + content
+	if writeErr := os.WriteFile(*outputPtr, []byte(outputContent), 0644); writeErr != nil {
+		log.Fatalf("error writing output to file '%s': %v", *outputPtr, writeErr)
 	}
 
-	fmt.Printf("Successfully processed directory: %s\n", *inputPtr)
-	fmt.Printf("Output written to: %s\n", outputFile)
+	// Display success message and summary to the console
+	fmt.Printf("Successfully processed path: %s\n", *inputPtr)
+	fmt.Printf("Output written to: %s\n", *outputPtr)
 	fmt.Println(summary)
 }
