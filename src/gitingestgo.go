@@ -78,7 +78,7 @@ func parseIgnoreFile(filePath string) ([]string, error) {
 /*
 matchesPattern checks if a given path (relative to the root) matches a .gitignore pattern.
 - It handles negation (!) patterns.
-- It recognizes patterns like "*" (recursive) and "/" (root-based) for directories.
+- It recognizes patterns like "**" (recursive) and "/" (root-based) for directories.
 - If a file or directory is matched by a pattern, it is considered ignored.
 */
 func matchesPattern(path string, pattern string, isDir bool) bool {
@@ -490,13 +490,6 @@ func ParseQuery(input string, maxFileSizeKB int, fromWeb bool, includePatternsSt
 		"*.pdf", "*.doc", "*.docx", "*.xls", "*.xlsx", "*.ppt", "*.pptx",
 		".gitignore", ".DS_Store",
 		"*.pem", "*.cer", "*.crt", "*.key",
-		"go.mod", "go.sum", "package-lock.json", "yarn.lock",
-		"*.min.js", "*.min.css",
-		"*.woff", "*.woff2", "*.eot", "*.ttf", "*.otf",
-		"*.svg", "*.ico", "*.webp",
-		"*.json", "*.xml", "*.yaml", "*.yml", "*.toml",
-		"*.md", "*.markdown", "*.rst", "*.txt",
-		"*.mod", "*.sum", "*.lock",
 	}
 
 	var finalIgnorePatterns []string

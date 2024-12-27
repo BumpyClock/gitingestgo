@@ -8,6 +8,6 @@ require (
 )
 
 require (
-	github.com/dlclark/regexp2 v1.10.0 // indirect
-	github.com/google/uuid v1.3.0 // indirect
+	github.com/dlclark/regexp2 v1.11.4 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 )
