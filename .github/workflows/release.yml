@@ -33,19 +33,29 @@ jobs:
         GOOS=linux GOARCH=amd64 go build -o gitingest-linux-x64 gitingestgo.go
 
     - name: Build for Linux (arm64)
-      run: GOOS=linux GOARCH=arm64 go build -o gitingest-linux-arm64 src/gitingestgo.go
+      run: |
+        cd src
+        GOOS=linux GOARCH=arm64 go build -o gitingest-linux-arm64 gitingestgo.go
 
     - name: Build for macOS (x64)
-      run: GOOS=darwin GOARCH=amd64 go build -o gitingest-macos-x64 src/gitingestgo.go
+      run: |
+        cd src
+        GOOS=darwin GOARCH=amd64 go build -o gitingest-macos-x64 gitingestgo.go
 
     - name: Build for macOS (arm64)
-      run: GOOS=darwin GOARCH=arm64 go build -o gitingest-macos-arm64 src/gitingestgo.go
+      run: |
+        cd src
+        GOOS=darwin GOARCH=arm64 go build -o gitingest-macos-arm64 gitingestgo.go
 
     - name: Build for Windows (x64)
-      run: GOOS=windows GOARCH=amd64 go build -o gitingest-windows-x64.exe src/gitingestgo.go
+      run: |
+        cd src
+        GOOS=windows GOARCH=amd64 go build -o gitingest-windows-x64.exe gitingestgo.go
 
     - name: Build for Windows (arm64)
-      run: GOOS=windows GOARCH=arm64 go build -o gitingest-windows-arm64.exe src/gitingestgo.go
+      run: |
+        cd src
+        GOOS=windows GOARCH=arm64 go build -o gitingest-windows-arm64.exe gitingestgo.go
 
     - name: Create Release
       id: create_release
