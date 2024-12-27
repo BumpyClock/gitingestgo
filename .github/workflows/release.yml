@@ -30,7 +30,7 @@ jobs:
     - name: Build for Linux (x64)
       run: |
         cd src
-        GOOS=linux GOARCH=amd64 go build -o gitingest-linux-x64 src/gitingestgo.go
+        GOOS=linux GOARCH=amd64 go build -o gitingest-linux-x64 gitingestgo.go
 
     - name: Build for Linux (arm64)
       run: GOOS=linux GOARCH=arm64 go build -o gitingest-linux-arm64 src/gitingestgo.go
