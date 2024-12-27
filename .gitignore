@@ -1,3 +1,4 @@
 /gitingest
 /output.txt
-/build/*
+/build
+build/gitingest

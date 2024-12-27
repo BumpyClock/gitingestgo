@@ -481,7 +481,6 @@ func ParseQuery(input string, maxFileSize int, fromWeb bool, includePatternsStr,
 		"*.o", "*.a", "*.so", "*.so.*", // Linux
 		"node_modules/", "vendor/", "bower_components/", // Node.js, PHP, Bower
 		".git/", ".svn/", ".hg/", ".DS_Store/", // Version control and macOS system files
-		".vscode/", ".idea/", ".sublime-project", ".sublime-workspace", ".idx", // IDE files
 		"__pycache__/", "venv/", ".venv/", "env/", ".env/", // Python virtual environments and caches
 		".idea/", ".vscode/", "*.sublime-project", "*.sublime-workspace", // IDE files
 		"*.log", "*.tmp", "*.bak", // Temporary and log files
@@ -493,8 +492,6 @@ func ParseQuery(input string, maxFileSize int, fromWeb bool, includePatternsStr,
 		"*.pdf", "*.doc", "*.docx", "*.xls", "*.xlsx", "*.ppt", "*.pptx", // Document files
 		".gitignore", ".DS_Store", // Other common files
 		"*.pem", "*.cer", "*.crt", "*.key", // Certificate and key files
-		"LICENSE", "LICENSE.txt", "LICENSE.md", "LICENSE.rst", "LICENSE.txt", "LICENSE.md", "LICENSE.rst", // License files
-		"README.MD", "README.md", "README.txt", "README.rst", "README.html", "README.pdf", // Readme files
 	}
 
 	if excludePatternsStr != "" {
