@@ -478,7 +478,7 @@ func ParseQuery(input string, maxFileSizeKB int, fromWeb bool, includePatternsSt
 		"*.pyc", "*.pyo", "*.pyd", "*.class", "*.jar", "*.war", "*.ear",
 		"*.obj", "*.a", "*.lib",
 		"node_modules/", "vendor/", "bower_components/",
-		".git/", ".svn/", ".hg/", ".DS_Store/",
+		".git/", ".svn/", ".hg/", ".DS_Store/", ".github/", ".vscode/", ".idea/", ".gitlab/", ".idx/", ".github/workflows/",
 		"__pycache__/", "venv/", ".venv/", "env/", ".env/",
 		".idea/", ".vscode/", "*.sublime-project", "*.sublime-workspace",
 		"*.log", "*.tmp", "*.bak",
@@ -489,7 +489,8 @@ func ParseQuery(input string, maxFileSizeKB int, fromWeb bool, includePatternsSt
 		"*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg",
 		"*.pdf", "*.doc", "*.docx", "*.xls", "*.xlsx", "*.ppt", "*.pptx",
 		".gitignore", ".DS_Store",
-		"*.pem", "*.cer", "*.crt", "*.key",
+		"*.pem", "*.cer", "*.crt", "*.key", "README.md", ".hintrc",
+		"*.svg", "*.eot", "*.ttf", "*.woff", "*.woff2", "*.otf", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.tiff", "*.ico", "*.mp4", "*.avi", "*.mkv", "*.mov", "*.wmv", "*.flv", "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg", "*.pdf", "*.doc", "*.docx", "*.xls", "*.xlsx", "*.ppt", "*.pptx", ".gitignore", ".DS_Store", "*.pem", "*.cer", "*.crt", "*.key", "README.md", ".hintrc", "*.svg", "*.eot", "*.ttf", "*.woff", "*.woff2", "*.otf",
 	}
 
 	var finalIgnorePatterns []string
