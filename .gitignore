@@ -3,3 +3,5 @@
 /build
 /build/*
 /build/gitingest
+src/digests-api.txt
+src/*.txt
