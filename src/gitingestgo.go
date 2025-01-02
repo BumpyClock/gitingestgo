@@ -20,30 +20,49 @@ import (
 	"github.com/spf13/viper"
 )
 
-// AppConfig corresponds to the structure in settings.json
+// AppConfig corresponds to the structure in settings.json.
+// It includes default ignore patterns and various limits for scanning.
 type AppConfig struct {
+	// DefaultIgnorePatterns is a list of directory/file patterns
+	// that should be skipped (e.g., build/, node_modules/, etc.).
 	DefaultIgnorePatterns []string `mapstructure:"default_ignore_patterns"`
-	MaxDirectoryDepth     int      `mapstructure:"max_directory_depth"`
-	MaxFiles              int      `mapstructure:"max_files"`
-	MaxTotalSizeBytes     int64    `mapstructure:"max_total_size_bytes"`
-	DefaultIgnoreFile     string   `mapstructure:"default_ignore_file"`
+
+	// MaxDirectoryDepth sets how deep the recursive scan goes.
+	MaxDirectoryDepth int `mapstructure:"max_directory_depth"`
+
+	// MaxFiles is the maximum number of files that can be processed.
+	MaxFiles int `mapstructure:"max_files"`
+
+	// MaxTotalSizeBytes is the maximum combined size of all processed files.
+	MaxTotalSizeBytes int64 `mapstructure:"max_total_size_bytes"`
+
+	// DefaultIgnoreFile is the default ignore file name (e.g., .gitignore).
+	DefaultIgnoreFile string `mapstructure:"default_ignore_file"`
 }
 
-// Colored log helpers
+// Colored log helpers for enriched console output.
 var (
 	warningLog = color.New(color.FgYellow).PrintfFunc()
 	infoLog    = color.New(color.FgCyan).PrintfFunc()
 	errorLog   = color.New(color.FgRed).PrintfFunc()
-	skipLog    = color.New(color.FgMagenta).SprintfFunc() // For final summary
+	skipLog    = color.New(color.FgMagenta).SprintfFunc() // Used for final summary of skipped items
 )
 
-// FileInfo holds essential file data
+// FileInfo holds essential metadata and content for a single file.
 type FileInfo struct {
-	Path    string
+	// Path is the relative path of the file from the scanned directory.
+	Path string
+
+	// Content is the text content of the file.
 	Content string
-	Size    int64
+
+	// Size is the file size in bytes.
+	Size int64
 }
 
+// main is the entry point for the CLI application.
+// It parses flags, loads configuration, scans the directory or file,
+// and outputs results to a file and console.
 func main() {
 	// CLI flags
 	inputPtr := flag.String("d", "", "Directory (or file) to process")
@@ -95,9 +114,14 @@ func main() {
 	printSkippedSummary(skipped)
 }
 
-/*
-loadConfig reads settings.json using Viper.
-*/
+// loadConfig reads the specified configFile using the Viper library,
+// unmarshals it into an AppConfig struct, and returns it.
+//
+//	configFile: The path to the JSON or YAML config file
+//
+// Returns:
+//
+//	(AppConfig, error): The loaded configuration or an error if loading fails.
 func loadConfig(configFile string) (AppConfig, error) {
 	var config AppConfig
 
@@ -113,12 +137,17 @@ func loadConfig(configFile string) (AppConfig, error) {
 	return config, nil
 }
 
-/*
-parseQuery merges:
-- Command-line inputs
-- The config from settings.json
-- Returns a map with all relevant scanning info
-*/
+// parseQuery merges command-line flags (e.g., maxFileSizeKB) with the
+// loaded config (e.g., DefaultIgnorePatterns) into a single map.
+//
+//	input: The path to scan (file or directory).
+//	maxFileSizeKB: Maximum file size in KB, passed as a CLI flag.
+//	config: The AppConfig loaded from settings.json.
+//
+// Returns:
+//
+//	map[string]interface{}: A generic map containing all relevant scanning info
+//	error: If the path is invalid or does not exist.
 func parseQuery(input string, maxFileSizeKB int, config AppConfig) (map[string]interface{}, error) {
 	result := make(map[string]interface{})
 
@@ -160,14 +189,19 @@ func parseQuery(input string, maxFileSizeKB int, config AppConfig) (map[string]i
 	return result, nil
 }
 
-/*
-IngestFromQuery:
- 1. Scans the directory
- 2. Formats file contents
- 3. Batch-counts tokens
- 4. Builds summary
-    => Also returns a slice of skipped resources to display rich output later
-*/
+// IngestFromQuery orchestrates the entire ingestion process,
+// including scanning directories, building a directory tree,
+// reading file contents, counting tokens, and generating a summary.
+//
+//	query: A map with scanning info (local_path, ignore_patterns, etc.)
+//
+// Returns:
+//
+//	summary       (string): A human-readable summary (e.g., repo name, token count).
+//	tree          (string): The ASCII representation of the directory structure.
+//	filesContent  (string): The concatenated file contents (with headers).
+//	skipped       ([]string): A list of skipped files/directories for final reporting.
+//	err           (error): Any error encountered during scanning or token counting.
 func IngestFromQuery(query map[string]interface{}) (
 	summary string,
 	tree string,
@@ -205,11 +239,19 @@ func IngestFromQuery(query map[string]interface{}) (
 	return summaryText, dirTree, formattedContent, skippedResources, nil
 }
 
-/*
-scanLocalDirectory uses improved isIgnored to skip directories mentioned
-in ignore patterns (like build/, dist/, etc.). It now also collects
-skipped paths in a slice for later reporting.
-*/
+// scanLocalDirectory recursively walks through the specified basePath,
+// skipping any directories/files that match ignorePatterns.
+//
+//	basePath       (string): The absolute path to a directory or file.
+//	ignorePatterns ([]string): Patterns (e.g., "node_modules/", "*.exe") to skip.
+//	maxFileSize    (int64): The maximum file size in bytes allowed.
+//
+// Returns:
+//
+//	files          ([]FileInfo): List of successfully read files with content.
+//	dirStructure   (string): ASCII directory tree representation.
+//	skippedPaths   ([]string): Accumulated list of skipped file/directory paths.
+//	err            (error): Any error encountered during the walk or file reads.
 func scanLocalDirectory(
 	basePath string,
 	ignorePatterns []string,
@@ -238,6 +280,7 @@ func scanLocalDirectory(
 	}
 
 	if fi.IsDir() {
+		// Traverse directory tree
 		err = filepath.Walk(basePath, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				warningLog("warning: error during Walk at '%s': %v\n", path, walkErr)
@@ -248,11 +291,11 @@ func scanLocalDirectory(
 				return nil
 			}
 
-			_ = bar.Add(1) // progress increment
+			_ = bar.Add(1) // increment progress
 
 			// Check if path is ignored
 			if isIgnored(relPath, info.IsDir(), ignorePatterns) {
-				// Store this path for later summary
+				// Store this path for final summary
 				mu.Lock()
 				skippedPaths = append(skippedPaths, relPath)
 				mu.Unlock()
@@ -270,6 +313,7 @@ func scanLocalDirectory(
 			} else if isTextFile(path) && info.Size() <= maxFileSize {
 				appendToTree(&dirStructure, relPath, false)
 
+				// Read file concurrently
 				wg.Add(1)
 				go func(p string, size int64, rPath string) {
 					defer wg.Done()
@@ -286,8 +330,8 @@ func scanLocalDirectory(
 			return nil
 		})
 	} else {
-		_ = bar.Add(1)
 		// Single file scenario
+		_ = bar.Add(1)
 		if isTextFile(basePath) && fi.Size() <= maxFileSize {
 			content, readErr := readFileLimited(basePath, maxFileSize)
 			if readErr == nil {
@@ -311,9 +355,16 @@ func scanLocalDirectory(
 	return files, dirStructure.String(), skippedPaths, nil
 }
 
-/*
-isIgnored checks if relPath matches any pattern from settings.json.
-*/
+// isIgnored checks if relPath matches any pattern from the provided patterns
+// and returns true if it should be skipped.
+//
+//	relPath (string): The path relative to the base directory.
+//	isDir   (bool):   Whether the path is a directory.
+//	patterns([]string): The ignore patterns from config.
+//
+// Returns:
+//
+//	bool: true if the path is matched by an ignore pattern, otherwise false.
 func isIgnored(relPath string, isDir bool, patterns []string) bool {
 	normalizedPath := filepath.ToSlash(relPath)
 	for _, p := range patterns {
@@ -328,10 +379,16 @@ func isIgnored(relPath string, isDir bool, patterns []string) bool {
 	return false
 }
 
-/*
-matchPath handles directory patterns (ending with /), wildcard files (*.exe),
-and exact matches. This is a simplified approach but covers typical cases.
-*/
+// matchPath handles directory patterns (ending with /), wildcard files (*.exe),
+// and exact matches.
+//
+//	path    (string): normalized relative path to check (forward slashes).
+//	pattern (string): current ignore pattern (e.g., build/, *.exe).
+//	isDir   (bool):   true if the path is a directory.
+//
+// Returns:
+//
+//	bool: true if path matches the pattern, otherwise false.
 func matchPath(path, pattern string, isDir bool) bool {
 	pattern = strings.TrimSpace(pattern)
 
@@ -361,7 +418,15 @@ func matchPath(path, pattern string, isDir bool) bool {
 	return path == pattern
 }
 
-// isTextFile uses heuristics
+// isTextFile performs a heuristic check to see if the file is likely text.
+// It reads up to 1KB of the file to find null bytes or unusual control chars,
+// which typically indicate a binary file.
+//
+//	filename (string): The path to the file.
+//
+// Returns:
+//
+//	bool: true if it passes text heuristics, false if it seems binary or unreadable.
 func isTextFile(filename string) bool {
 	f, err := os.Open(filename)
 	if err != nil {
@@ -392,11 +457,26 @@ func isTextFile(filename string) bool {
 	return true
 }
 
+// isUnicodeBOM checks if the provided 4 bytes correspond to a UTF-8 BOM.
+//
+//	b ([]byte): The first 4 bytes of a file.
+//
+// Returns:
+//
+//	bool: true if b is the UTF-8 BOM signature, otherwise false.
 func isUnicodeBOM(b []byte) bool {
 	return (b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF)
 }
 
-// readFileLimited reads up to maxSize
+// readFileLimited reads the file content up to maxSize bytes.
+//
+//	path (string): The path to the file.
+//	maxSize (int64): The maximum allowed file size in bytes.
+//
+// Returns:
+//
+//	string: The file content if within size limits.
+//	error:  If the file is too large or cannot be read.
 func readFileLimited(path string, maxSize int64) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -424,9 +504,11 @@ func readFileLimited(path string, maxSize int64) (string, error) {
 	return sb.String(), nil
 }
 
-/*
-appendToTree: simplified ASCII tree. If you need accurate ├ vs. └, track sibling indexes.
-*/
+// appendToTree builds a simplified ASCII directory tree.
+//
+//	builder (*strings.Builder): The output accumulator for the tree representation.
+//	relPath (string): The relative path to append (e.g., subdirectory/file).
+//	isDir   (bool):   Whether the path is a directory.
 func appendToTree(builder *strings.Builder, relPath string, isDir bool) {
 	depth := strings.Count(relPath, string(os.PathSeparator))
 	if depth == 0 {
@@ -446,10 +528,14 @@ func appendToTree(builder *strings.Builder, relPath string, isDir bool) {
 	}
 }
 
-/*
-formatFilesContent arranges text files with a heading
-and prioritizes README.md if present.
-*/
+// formatFilesContent arranges all file contents with a header. If a README.md
+// is found, it is placed at the top. Each file is separated by a clear delimiter.
+//
+//	files ([]FileInfo): The list of FileInfo structs with path and content.
+//
+// Returns:
+//
+//	string: The combined text for all files, with ASCII headers.
 func formatFilesContent(files []FileInfo) string {
 	var sb strings.Builder
 	separator := strings.Repeat("=", 48) + "\n"
@@ -476,9 +562,17 @@ func formatFilesContent(files []FileInfo) string {
 	return sb.String()
 }
 
-/*
-batchCountTokens uses the *tiktoken.Tiktoken encoder to compute approximate token usage.
-*/
+// batchCountTokens encodes the directory tree and each file’s content to estimate
+// the total token usage using tiktoken.
+//
+//	enc (*tiktoken.Tiktoken): The encoder for token counting.
+//	files ([]FileInfo):       The files read from the directory.
+//	dirTree (string):         The ASCII directory tree.
+//
+// Returns:
+//
+//	(string, error): A user-friendly string (e.g., "1.2k") if successful,
+//	                 or an error if encoding fails.
 func batchCountTokens(enc *tiktoken.Tiktoken, files []FileInfo, dirTree string) (string, error) {
 	totalTokens := 0
 
@@ -503,9 +597,19 @@ func batchCountTokens(enc *tiktoken.Tiktoken, files []FileInfo, dirTree string) 
 	}
 }
 
-/*
-createSummary shows repo name, file count, etc.
-*/
+// createSummary compiles a brief textual report about the scanning operation,
+// including the number of files analyzed and approximate token count.
+//
+//	repoName (string): A short name or slug for the repository or project.
+//	branch   (string): The branch name if any.
+//	commit   (string): The commit SHA if any.
+//	subpath  (string): A subdirectory path if scanning only a sub-tree.
+//	fileCount(int):    Number of files that were successfully processed.
+//	tokenCount(string): The user-friendly token count string.
+//
+// Returns:
+//
+//	string: A final summary line that can be printed to the console.
 func createSummary(repoName, branch, commit, subpath string, fileCount int, tokenCount string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Repository: %s\n", repoName))
@@ -523,9 +627,11 @@ func createSummary(repoName, branch, commit, subpath string, fileCount int, toke
 	return sb.String()
 }
 
-/*
-printSkippedSummary prints all skipped resources after scanning, in color.
-*/
+// printSkippedSummary prints all skipped resources after the scan has completed.
+// This is called at the end of main for a richer final output.
+//
+//	skipped ([]string): A list of directory/file paths that were ignored
+//	                    due to the configured ignore patterns.
 func printSkippedSummary(skipped []string) {
 	if len(skipped) == 0 {
 		infoLog("\nNo resources were skipped based on your ignore patterns!\n")
@@ -534,9 +640,9 @@ func printSkippedSummary(skipped []string) {
 
 	// Title
 	fmt.Println()
-	color.New(color.FgMagenta, color.Bold).Println("Skipped Resources:")
-	for _, s := range skipped {
-		fmt.Printf("  %s\n", skipLog("%s", s))
-	}
+	color.New(color.FgMagenta, color.Bold).Printf("Skipped Resources: %d\n", len(skipped))
+	// for _, s := range skipped {
+	// 	fmt.Printf("  %s\n", skipLog("%s", s))
+	// }
 	fmt.Println()
 }
