@@ -45,7 +45,7 @@ var (
 	warningLog = color.New(color.FgYellow).PrintfFunc()
 	infoLog    = color.New(color.FgCyan).PrintfFunc()
 	errorLog   = color.New(color.FgRed).PrintfFunc()
-	skipLog    = color.New(color.FgMagenta).SprintfFunc() // Used for final summary of skipped items
+	skipLog    = color.New(color.FgMagenta).PrintfFunc() // Used for final summary of skipped items
 )
 
 // FileInfo holds essential metadata and content for a single file.
@@ -640,7 +640,7 @@ func printSkippedSummary(skipped []string) {
 
 	// Title
 	fmt.Println()
-	color.New(color.FgMagenta, color.Bold).Printf("Skipped Resources: %d\n", len(skipped))
+	skipLog("Skipped Resources: %d\n", len(skipped))
 	// for _, s := range skipped {
 	// 	fmt.Printf("  %s\n", skipLog("%s", s))
 	// }
