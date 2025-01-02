@@ -478,7 +478,7 @@ func ParseQuery(input string, maxFileSizeKB int, fromWeb bool, includePatternsSt
 		"*.pyc", "*.pyo", "*.pyd", "*.class", "*.jar", "*.war", "*.ear",
 		"*.obj", "*.a", "*.lib",
 		"node_modules/", "vendor/", "bower_components/",
-		".git/", ".svn/", ".hg/", ".DS_Store/", ".github/", ".vscode/", ".idea/", ".gitlab/", ".idx/", ".github/workflows/",
+		".git/", ".svn/", ".hg/", ".DS_Store/", ".github/", ".vscode/", ".idea/", ".gitlab/", ".idx/", ".github/workflows/", "bin/", "obj/", "out/", "dist/", "build/", "target/", "node_modules/", "vendor/", "bower_components/", "logs/", "tmp/", "temp/", "cache/", "backup/", "backups/", "uploads/", "downloads/", "dumps/", "archives/", "images/", "videos/", "audio/", "fonts/", "logs/", "tmp/", "temp/", "cache/", "backup/", "backups/", "uploads/", "downloads/", "dumps/", "archives/", "images/", "videos/", "audio/", "fonts/",
 		"__pycache__/", "venv/", ".venv/", "env/", ".env/",
 		".idea/", ".vscode/", "*.sublime-project", "*.sublime-workspace",
 		"*.log", "*.tmp", "*.bak",
