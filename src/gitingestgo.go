@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,16 +17,27 @@ import (
 	"github.com/mr-tron/base58/base58"
 	"github.com/pkoukk/tiktoken-go"
 	"github.com/schollz/progressbar/v3"
+	"github.com/spf13/viper"
 )
 
-// --- Colored log helpers for convenience ---
+// AppConfig corresponds to the structure in settings.json
+type AppConfig struct {
+	DefaultIgnorePatterns []string `mapstructure:"default_ignore_patterns"`
+	MaxDirectoryDepth     int      `mapstructure:"max_directory_depth"`
+	MaxFiles              int      `mapstructure:"max_files"`
+	MaxTotalSizeBytes     int64    `mapstructure:"max_total_size_bytes"`
+	DefaultIgnoreFile     string   `mapstructure:"default_ignore_file"`
+}
+
+// Colored log helpers
 var (
 	warningLog = color.New(color.FgYellow).PrintfFunc()
 	infoLog    = color.New(color.FgCyan).PrintfFunc()
 	errorLog   = color.New(color.FgRed).PrintfFunc()
+	skipLog    = color.New(color.FgMagenta).SprintfFunc() // For final summary
 )
 
-// FileInfo holds essential file data, including path, content, and size.
+// FileInfo holds essential file data
 type FileInfo struct {
 	Path    string
 	Content string
@@ -33,10 +45,10 @@ type FileInfo struct {
 }
 
 func main() {
-	// Command-line flags
+	// CLI flags
 	inputPtr := flag.String("d", "", "Directory (or file) to process")
 	outputPtr := flag.String("o", "", "Output file name")
-	maxFileSizePtr := flag.Int("s", 10, "Max file size in KB")
+	maxFileSizePtr := flag.Int("s", 10, "Max file size in KB (defaults to 10KB)")
 	flag.Parse()
 
 	if *inputPtr == "" {
@@ -46,208 +58,218 @@ func main() {
 		log.Fatal("error: you must provide an output file name using -o <filename>")
 	}
 
-	// Parse user query (simplified)
-	query, err := parseQuery(*inputPtr, *maxFileSizePtr)
+	// 1. Load config from settings.json
+	config, err := loadConfig("settings.json")
+	if err != nil {
+		errorLog("error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 2. Parse user query (merges config’s ignore patterns, etc.)
+	query, err := parseQuery(*inputPtr, *maxFileSizePtr, config)
 	if err != nil {
 		errorLog("error parsing query: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Main ingestion: scan directory, format output, count tokens
-	summary, tree, content, err := IngestFromQuery(query)
+	// 3. Ingest data (scan, build tree, combine file content)
+	summary, tree, content, skipped, err := IngestFromQuery(query)
 	if err != nil {
 		errorLog("error during ingestion: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Write the directory structure + file content to the specified output file
+	// 4. Write results to output file
 	outputContent := "Directory structure:\n" + tree + "\n" + content
 	if writeErr := os.WriteFile(*outputPtr, []byte(outputContent), 0644); writeErr != nil {
 		errorLog("error writing output to file '%s': %v\n", *outputPtr, writeErr)
 		os.Exit(1)
 	}
 
-	// Success messages
+	// 5. Display success
 	infoLog("Successfully processed path: %s\n", *inputPtr)
 	infoLog("Output written to: %s\n", *outputPtr)
 	fmt.Println(summary)
+
+	// 6. Display a rich summary of skipped resources
+	printSkippedSummary(skipped)
 }
 
 /*
-parseQuery orchestrates basic input logic:
-- Ensures the path exists
-- Converts it to absolute
-- Returns a map of query metadata (e.g., local_path, max_file_size, ignore_patterns)
+loadConfig reads settings.json using Viper.
 */
-func parseQuery(input string, maxFileSizeKB int) (map[string]interface{}, error) {
+func loadConfig(configFile string) (AppConfig, error) {
+	var config AppConfig
+
+	viper.SetConfigFile(configFile)
+	err := viper.ReadInConfig()
+	if err != nil {
+		return config, err
+	}
+	err = viper.Unmarshal(&config)
+	if err != nil {
+		return config, err
+	}
+	return config, nil
+}
+
+/*
+parseQuery merges:
+- Command-line inputs
+- The config from settings.json
+- Returns a map with all relevant scanning info
+*/
+func parseQuery(input string, maxFileSizeKB int, config AppConfig) (map[string]interface{}, error) {
 	result := make(map[string]interface{})
 
+	if input == "" {
+		return nil, errors.New("no input path specified")
+	}
 	absPath, err := filepath.Abs(input)
 	if err != nil {
 		return nil, fmt.Errorf("invalid local path: %w", err)
 	}
-
 	if _, err := os.Stat(absPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("the specified path does not exist: %s", absPath)
 	}
 
+	// Populate essential fields
 	result["local_path"] = absPath
-	result["slug"] = filepath.Base(absPath) // e.g., "myproject"
+	result["slug"] = filepath.Base(absPath)
 	result["subpath"] = "/"
 
-	// Generate a short ID from path-based hashing
+	// Generate short ID
 	idBytes := sha256.Sum256([]byte(absPath))
-	result["id"] = base58.Encode(idBytes[:16]) // keep it shorter
+	result["id"] = base58.Encode(idBytes[:16])
 
 	// Convert KB to bytes
 	result["max_file_size"] = int64(maxFileSizeKB * 1024)
 
-	// Simplified ignore pattern (override in real code as needed)
-	result["ignore_patterns"] = []string{".git/"}
+	// Merge config’s default ignore patterns
+	ignorePatterns := make([]string, 0, len(config.DefaultIgnorePatterns))
+	ignorePatterns = append(ignorePatterns, config.DefaultIgnorePatterns...)
+
+	result["ignore_patterns"] = ignorePatterns
+
+	// Additional config fields if you need them:
+	result["max_directory_depth"] = config.MaxDirectoryDepth
+	result["max_files"] = config.MaxFiles
+	result["max_total_size_bytes"] = config.MaxTotalSizeBytes
+	result["default_ignore_file"] = config.DefaultIgnoreFile
 
 	return result, nil
 }
 
 /*
-IngestFromQuery handles:
-- Scanning the local directory for text files
-- Building an ASCII directory tree
-- Formatting file contents
-- Counting tokens in batches
+IngestFromQuery:
+ 1. Scans the directory
+ 2. Formats file contents
+ 3. Batch-counts tokens
+ 4. Builds summary
+    => Also returns a slice of skipped resources to display rich output later
 */
-func IngestFromQuery(query map[string]interface{}) (string, string, string, error) {
+func IngestFromQuery(query map[string]interface{}) (
+	summary string,
+	tree string,
+	filesContent string,
+	skipped []string,
+	err error,
+) {
 	localPath := query["local_path"].(string)
 	ignorePatterns := query["ignore_patterns"].([]string)
 	maxFileSize := query["max_file_size"].(int64)
 
-	// 1. Scan local directory (files + tree)
-	files, dirTree, err := scanLocalDirectory(localPath, ignorePatterns, maxFileSize)
-	if err != nil {
-		return "", "", "", fmt.Errorf("scan error: %w", err)
+	// 1. Scan (files, dirTree, and a list of skipped paths)
+	files, dirTree, skippedResources, scanErr := scanLocalDirectory(localPath, ignorePatterns, maxFileSize)
+	if scanErr != nil {
+		return "", "", "", nil, fmt.Errorf("scan error: %w", scanErr)
 	}
 
-	// 2. Format file contents (placing README.md first, etc.)
+	// 2. Format
 	formattedContent := formatFilesContent(files)
 
-	// 3. Batch token counting with the correct type: *tiktoken.Tiktoken
-	enc, encErr := tiktoken.GetEncoding("cl100k_base") // or EncodingForModel("...")
+	// 3. Batch token counting
+	enc, encErr := tiktoken.GetEncoding("cl100k_base")
 	if encErr != nil {
-		return "", "", "", fmt.Errorf("failed to get encoding: %w", encErr)
+		return "", "", "", nil, fmt.Errorf("failed to get encoding: %w", encErr)
 	}
-
 	tokenCount, tokenErr := batchCountTokens(enc, files, dirTree)
 	if tokenErr != nil {
-		return "", "", "", fmt.Errorf("token counting error: %w", tokenErr)
+		return "", "", "", nil, fmt.Errorf("token counting error: %w", tokenErr)
 	}
 
 	// 4. Summary
 	slug, _ := query["slug"].(string)
 	summaryText := createSummary(slug, "", "", "/", len(files), tokenCount)
 
-	return summaryText, dirTree, formattedContent, nil
+	return summaryText, dirTree, formattedContent, skippedResources, nil
 }
 
 /*
-batchCountTokens takes:
-- A *tiktoken.Tiktoken encoder
-- A slice of FileInfo
-- The ASCII directory tree
-
-It encodes each piece of text (dir tree + file contents) to count tokens in batches.
-*/
-func batchCountTokens(enc *tiktoken.Tiktoken, files []FileInfo, dirTree string) (string, error) {
-	totalTokens := 0
-
-	// Encode directory tree
-	dirTokens := enc.Encode(dirTree, nil, nil)
-	totalTokens += len(dirTokens)
-
-	// Encode each file's content
-	for _, f := range files {
-		fileTokens := enc.Encode(f.Content, nil, nil)
-		totalTokens += len(fileTokens)
-	}
-
-	// Convert numeric token count to friendly string
-	switch {
-	case totalTokens > 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(totalTokens)/1_000_000), nil
-	case totalTokens > 1_000:
-		return fmt.Sprintf("%.1fk", float64(totalTokens)/1_000), nil
-	default:
-		return fmt.Sprintf("%d", totalTokens), nil
-	}
-}
-
-/*
-scanLocalDirectory scans:
-1. A directory (recursively) using filepath.Walk
-2. Or a single file if the base path is not a directory
-
-We integrate a progress bar (indeterminate) for user feedback.
+scanLocalDirectory uses improved isIgnored to skip directories mentioned
+in ignore patterns (like build/, dist/, etc.). It now also collects
+skipped paths in a slice for later reporting.
 */
 func scanLocalDirectory(
 	basePath string,
 	ignorePatterns []string,
 	maxFileSize int64,
-) ([]FileInfo, string, error) {
+) ([]FileInfo, string, []string, error) {
 
 	var files []FileInfo
 	var dirStructure strings.Builder
+	var skippedPaths []string
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	// Create an indeterminate progress bar (total = -1)
 	bar := progressbar.NewOptions(-1,
 		progressbar.OptionSetDescription("Scanning files/directories"),
 		progressbar.OptionEnableColorCodes(true),
 		progressbar.OptionShowCount(),
 		progressbar.OptionOnCompletion(func() {
-			fmt.Println() // New line after finishing
+			fmt.Println()
 		}),
 	)
 	defer bar.Finish()
 
-	fileInfo, err := os.Lstat(basePath)
+	fi, err := os.Lstat(basePath)
 	if err != nil {
-		return nil, "", fmt.Errorf("unable to get file info for '%s': %w", basePath, err)
+		return nil, "", nil, fmt.Errorf("unable to get file info for '%s': %w", basePath, err)
 	}
 
-	// If it's a directory
-	if fileInfo.IsDir() {
+	if fi.IsDir() {
 		err = filepath.Walk(basePath, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				warningLog("warning: error during Walk at '%s': %v\n", path, walkErr)
 				return walkErr
 			}
-
 			relPath, _ := filepath.Rel(basePath, path)
 			if relPath == "." {
 				return nil
 			}
 
-			// Increment the progress bar for each file or directory visited
-			_ = bar.Add(1)
+			_ = bar.Add(1) // progress increment
 
-			// Check ignore patterns
-			for _, pattern := range ignorePatterns {
-				if matchesPattern(relPath, pattern, info.IsDir()) {
-					if info.IsDir() {
-						infoLog("info: skipping directory '%s' (pattern: '%s')\n", relPath, pattern)
-						return filepath.SkipDir
-					}
-					infoLog("info: skipping file '%s' (pattern: '%s')\n", relPath, pattern)
-					return nil
+			// Check if path is ignored
+			if isIgnored(relPath, info.IsDir(), ignorePatterns) {
+				// Store this path for later summary
+				mu.Lock()
+				skippedPaths = append(skippedPaths, relPath)
+				mu.Unlock()
+
+				if info.IsDir() {
+					// Skip entire directory
+					return filepath.SkipDir
 				}
+				return nil
 			}
 
-			// Build ASCII directory tree
+			// Build ASCII tree
 			if info.IsDir() {
-				appendToTree(&dirStructure, relPath, basePath, true)
+				appendToTree(&dirStructure, relPath, true)
 			} else if isTextFile(path) && info.Size() <= maxFileSize {
-				appendToTree(&dirStructure, relPath, basePath, false)
+				appendToTree(&dirStructure, relPath, false)
 
-				// Read file concurrently
 				wg.Add(1)
 				go func(p string, size int64, rPath string) {
 					defer wg.Done()
@@ -257,27 +279,22 @@ func scanLocalDirectory(
 						return
 					}
 					mu.Lock()
-					files = append(files, FileInfo{
-						Path:    rPath,
-						Content: content,
-						Size:    size,
-					})
+					files = append(files, FileInfo{Path: rPath, Content: content, Size: size})
 					mu.Unlock()
 				}(path, info.Size(), relPath)
 			}
-
 			return nil
 		})
 	} else {
-		// Single file scenario
 		_ = bar.Add(1)
-		if isTextFile(basePath) && fileInfo.Size() <= maxFileSize {
+		// Single file scenario
+		if isTextFile(basePath) && fi.Size() <= maxFileSize {
 			content, readErr := readFileLimited(basePath, maxFileSize)
 			if readErr == nil {
 				files = append(files, FileInfo{
 					Path:    filepath.Base(basePath),
 					Content: content,
-					Size:    fileInfo.Size(),
+					Size:    fi.Size(),
 				})
 				dirStructure.WriteString(filepath.Base(basePath) + "\n")
 			} else {
@@ -289,24 +306,62 @@ func scanLocalDirectory(
 	wg.Wait()
 
 	if err != nil {
-		return files, dirStructure.String(), fmt.Errorf("error walking directory '%s': %w", basePath, err)
+		return files, dirStructure.String(), skippedPaths, fmt.Errorf("error walking directory '%s': %w", basePath, err)
 	}
-	return files, dirStructure.String(), nil
+	return files, dirStructure.String(), skippedPaths, nil
 }
 
-// matchesPattern checks if the current path matches an ignore pattern.
-func matchesPattern(path, pattern string, isDir bool) bool {
-	// Very simplified example. Adjust to your real .gitignore logic.
-	if strings.HasSuffix(pattern, "/") && !isDir {
-		return false
-	}
-	if strings.Contains(path, strings.TrimSuffix(pattern, "/")) {
-		return true
+/*
+isIgnored checks if relPath matches any pattern from settings.json.
+*/
+func isIgnored(relPath string, isDir bool, patterns []string) bool {
+	normalizedPath := filepath.ToSlash(relPath)
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p == "" || strings.HasPrefix(p, "#") {
+			continue
+		}
+		if matchPath(normalizedPath, p, isDir) {
+			return true
+		}
 	}
 	return false
 }
 
-// isTextFile uses heuristics to detect if a file is likely text.
+/*
+matchPath handles directory patterns (ending with /), wildcard files (*.exe),
+and exact matches. This is a simplified approach but covers typical cases.
+*/
+func matchPath(path, pattern string, isDir bool) bool {
+	pattern = strings.TrimSpace(pattern)
+
+	// Directory pattern => ends with '/'
+	if strings.HasSuffix(pattern, "/") {
+		dirName := strings.TrimSuffix(pattern, "/")
+		if isDir {
+			if path == dirName || strings.HasPrefix(path, dirName+"/") {
+				return true
+			}
+		} else {
+			if strings.HasPrefix(path, dirName+"/") {
+				return true
+			}
+		}
+		return false
+	}
+
+	// If pattern has '*', treat it as wildcard
+	if strings.Contains(pattern, "*") {
+		baseName := filepath.Base(path)
+		matched, _ := filepath.Match(pattern, baseName)
+		return matched
+	}
+
+	// Otherwise exact match
+	return path == pattern
+}
+
+// isTextFile uses heuristics
 func isTextFile(filename string) bool {
 	f, err := os.Open(filename)
 	if err != nil {
@@ -315,24 +370,21 @@ func isTextFile(filename string) bool {
 	}
 	defer f.Close()
 
-	// Check BOM
 	bom := make([]byte, 4)
 	if _, err := f.Read(bom); err == nil {
 		if isUnicodeBOM(bom) {
 			return true
 		}
 	}
+	f.Seek(0, io.SeekStart)
 
-	_, _ = f.Seek(0, io.SeekStart)
 	buf := make([]byte, 1024)
 	n, err := f.Read(buf)
 	if err != nil && err != io.EOF {
 		warningLog("warning: could not read file '%s': %v\n", filename, err)
 		return false
 	}
-
 	for _, b := range buf[:n] {
-		// Null bytes or unusual control chars typically indicate binary
 		if b == 0 || (b < 32 && b != 9 && b != 10 && b != 13) {
 			return false
 		}
@@ -340,12 +392,11 @@ func isTextFile(filename string) bool {
 	return true
 }
 
-// isUnicodeBOM checks for a UTF-8 BOM signature.
 func isUnicodeBOM(b []byte) bool {
 	return (b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF)
 }
 
-// readFileLimited reads the file up to maxSize bytes.
+// readFileLimited reads up to maxSize
 func readFileLimited(path string, maxSize int64) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -374,11 +425,9 @@ func readFileLimited(path string, maxSize int64) (string, error) {
 }
 
 /*
-appendToTree builds the ASCII directory tree. This is a simplified version
-that doesn't check if an item is the last sibling. Adjust if you need
-accurate ├ vs. └ branching.
+appendToTree: simplified ASCII tree. If you need accurate ├ vs. └, track sibling indexes.
 */
-func appendToTree(builder *strings.Builder, relPath, basePath string, isDir bool) {
+func appendToTree(builder *strings.Builder, relPath string, isDir bool) {
 	depth := strings.Count(relPath, string(os.PathSeparator))
 	if depth == 0 {
 		if isDir {
@@ -390,7 +439,6 @@ func appendToTree(builder *strings.Builder, relPath, basePath string, isDir bool
 	}
 	prefix := strings.Repeat("│   ", depth-1)
 	name := filepath.Base(relPath)
-	// Simplified: treat everything as 'last' in this example
 	if isDir {
 		builder.WriteString(prefix + "└── " + name + string(os.PathSeparator) + "\n")
 	} else {
@@ -399,14 +447,14 @@ func appendToTree(builder *strings.Builder, relPath, basePath string, isDir bool
 }
 
 /*
-formatFilesContent arranges text files to display their content with a
-section header. It also places README.md at the top if it exists.
+formatFilesContent arranges text files with a heading
+and prioritizes README.md if present.
 */
 func formatFilesContent(files []FileInfo) string {
 	var sb strings.Builder
 	separator := strings.Repeat("=", 48) + "\n"
 
-	// Place README.md first if present
+	// Place README.md first if it exists
 	for i, file := range files {
 		if strings.ToLower(file.Path) == "readme.md" {
 			sb.WriteString(separator)
@@ -418,7 +466,7 @@ func formatFilesContent(files []FileInfo) string {
 		}
 	}
 
-	// Append all other files
+	// The rest of the files
 	for _, file := range files {
 		sb.WriteString(separator)
 		sb.WriteString(fmt.Sprintf("File: %s\n", file.Path))
@@ -429,11 +477,34 @@ func formatFilesContent(files []FileInfo) string {
 }
 
 /*
-createSummary forms a short textual summary of the scanning operation:
-- Repo/slug name
-- # of files
-- Subpath, if any
-- Estimated token count
+batchCountTokens uses the *tiktoken.Tiktoken encoder to compute approximate token usage.
+*/
+func batchCountTokens(enc *tiktoken.Tiktoken, files []FileInfo, dirTree string) (string, error) {
+	totalTokens := 0
+
+	// Encode directory structure
+	dirTokens := enc.Encode(dirTree, nil, nil)
+	totalTokens += len(dirTokens)
+
+	// Encode each file’s content
+	for _, f := range files {
+		toks := enc.Encode(f.Content, nil, nil)
+		totalTokens += len(toks)
+	}
+
+	// Convert numeric token count to a user-friendly string
+	switch {
+	case totalTokens > 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(totalTokens)/1_000_000), nil
+	case totalTokens > 1_000:
+		return fmt.Sprintf("%.1fk", float64(totalTokens)/1_000), nil
+	default:
+		return fmt.Sprintf("%d", totalTokens), nil
+	}
+}
+
+/*
+createSummary shows repo name, file count, etc.
 */
 func createSummary(repoName, branch, commit, subpath string, fileCount int, tokenCount string) string {
 	var sb strings.Builder
@@ -450,4 +521,22 @@ func createSummary(repoName, branch, commit, subpath string, fileCount int, toke
 	}
 	sb.WriteString(fmt.Sprintf("Estimated tokens: %s", tokenCount))
 	return sb.String()
+}
+
+/*
+printSkippedSummary prints all skipped resources after scanning, in color.
+*/
+func printSkippedSummary(skipped []string) {
+	if len(skipped) == 0 {
+		infoLog("\nNo resources were skipped based on your ignore patterns!\n")
+		return
+	}
+
+	// Title
+	fmt.Println()
+	color.New(color.FgMagenta, color.Bold).Println("Skipped Resources:")
+	for _, s := range skipped {
+		fmt.Printf("  %s\n", skipLog("%s", s))
+	}
+	fmt.Println()
 }

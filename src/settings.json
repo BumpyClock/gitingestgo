@@ -1,25 +1,25 @@
 {
-    "default_ignore_patterns": [
-      "*.o", "*.exe", "*.dll", "*.so", "*.dylib",".air.toml",
-      "*.pyc", "*.pyo", "*.pyd", "*.class", "*.jar", "*.war", "*.ear",
-      "*.obj", "*.a", "*.lib", "*.log", "*.tmp", "*.bak",
-      "node_modules/", "vendor/", "bower_components/","build/", "dist/", "out/","target/","bin/",
-      "__pycache__/", "venv/", ".venv/", "env/", ".env/",
-      ".git/", ".svn/", ".hg/", ".DS_Store/",".idea/",".vscode/",".github/",".gitignore",
-      ".idea/", ".vscode/", "*.sublime-project", "*.sublime-workspace",
-      "*.zip", "*.tar", "*.tar.gz", "*.rar", "*.7z",
-      "*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.tiff", "*.ico",
-      "*.mp4", "*.avi", "*.mkv", "*.mov", "*.wmv", "*.flv",
-      "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg",
-      "*.pdf", "*.doc", "*.docx", "*.xls", "*.xlsx", "*.ppt", "*.pptx",
-      "*.pem", "*.cer", "*.crt", "*.key",
-      "*.svg", "*.eot", "*.ttf", "*.woff", "*.woff2", "*.otf","*.ico",
-      "*.yml", "*.yaml", "*.json", "*.xml", "*.toml", "*.ini", "*.cfg", "*.conf",
-      "Readme*", "readme*", "CHANGELOG*", "changelog*", "LICENSE*", "license*","README.md"
-    ],
-    "max_directory_depth": 20,
-    "max_files": 10000,
-    "max_total_size_bytes": 524288000,
-    "default_ignore_file": ".gitignore"
-  }
-  
+  "default_ignore_patterns": [
+    "*.o", "*.exe", "*.dll", "*.so", "*.dylib",".air.toml",
+    "*.pyc", "*.pyo", "*.pyd", "*.class", "*.jar", "*.war", "*.ear",
+    "*.obj", "*.a", "*.lib", "*.log", "*.tmp", "*.bak",
+    "node_modules/", "vendor/", "bower_components/","build/", "dist/", "out/","target/","bin/",".vs",
+    "bin/","obj/",".gradle/",".idea/",".vscode/",".git/",".svn/",".hg/",".DS_Store/",".cache/",".pytest_cache/",".mypy_cache/",".tox/",".venv/",".env/",".gitignore",
+    "__pycache__/", "venv/", ".venv/", "env/", ".env/",
+    ".git/", ".svn/", ".hg/", ".DS_Store/",".idea/",".vscode/",".github/",".gitignore",
+    ".idea/", ".vscode/", "*.sublime-project", "*.sublime-workspace",
+    "*.zip", "*.tar", "*.tar.gz", "*.rar", "*.7z",
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.tiff", "*.ico",
+    "*.mp4", "*.avi", "*.mkv", "*.mov", "*.wmv", "*.flv",
+    "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg",
+    "*.pdf", "*.doc", "*.docx", "*.xls", "*.xlsx", "*.ppt", "*.pptx",
+    "*.pem", "*.cer", "*.crt", "*.key",
+    "*.svg", "*.eot", "*.ttf", "*.woff", "*.woff2", "*.otf","*.ico",
+    "*.yml", "*.yaml", "*.json", "*.xml", "*.toml", "*.ini", "*.cfg", "*.conf",
+    "Readme*", "readme*", "CHANGELOG*", "changelog*", "LICENSE*", "license*","README.md"
+  ],
+  "max_directory_depth": 20,
+  "max_files": 10000,
+  "max_total_size_bytes": 524288000,
+  "default_ignore_file": ".gitignore"
+}
